@@ -8,4 +8,4 @@ In the upper right corner of the document, you have the option to toggle the cod
 
 All the .qmd files can be opened using RStudio (with Quarto installed). They are quite similar to R Markdown files but are more user-friendly. They can be also viewed online, with R codes included in the chunks.
 
- If you have any questions, please feel free to email me.
+ If you have any questions, please feel free to email shiruxin@msu.edu
