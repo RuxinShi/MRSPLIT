@@ -1,0 +1,670 @@
+---
+title: MR V.S. 2sls (F30)
+author: 
+  - name: Ruxin Shi
+    orcid: 0009-0001-9483-6444
+    email: shiruxin@msu.edu
+    affiliations: 
+      - name: Michigan State University, Statistics and Probability
+params:
+  SourceDir: "Simulation study/"
+  SourceFile: "mr vs 2sls.qmd"
+  LogFile: "MR V.S. 2sls (F30).html"
+date: now
+date-modified: last-modified
+date-format: YYYY-MM-DD HH:mm:ss z
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    number-sections: true
+    number-depth: 3
+    code-fold: true
+    code-tools: true
+    code-line-numbers: false
+    embed-resources: true 
+    anchor-sections: true
+execute:
+  eval: true
+  echo: fenced
+  output: true
+  message: true
+  warning: false
+  error: true
+  include: true
+knitr:
+  opts_chunk: 
+    message: true 
+    cfsize: "scriptsize"
+---
+
+```{=tex}
+\begin{comment}
+# Hidden: Notes for User
+This script makes use of the LaTeX `verbatim` package's `\comment` command to
+build in hidden headings and text that are here for the team preparing the
+report but will be omitted from the knitted PDF output file. This makes it
+easier to put important comments directly in the file while still creating fully
+formatted output that only shows the desired content. So, text inside a comment
+block will be omitted from the PDF output.
+
+We can also use code chunks with chunk options such as `#| include: false`, 
+`#| echo: false`, `#| message: false`, `#| warning: false` and so on to 
+precisely control what R output shows up in the final PDF file. Thus, a script 
+file can both serve as process documentation and efficiently generate the final 
+version of a report output by applying the reproducible research and literate
+programming concepts and tools. 
+
+The `\lfoot` command just below sets the left footer to match the script's 
+`LofgFile` parameter value, which we can pass along when rendering the script. 
+Ideally it would be in the YAML `include-in-header:` with other pieces, but
+I can't get inline code to work if I do it that way. This is the only way I 
+could get the filename-based footer to work. 
+
+The LaTeX `placeins` package provides the `\FloatBarrier` command. Using that 
+before section headings help keep the figures and tables in their respective 
+sections. 
+\end{comment}
+```
+\lfoot{\texttt{\small \detokenize{`r params$LogFile`}}}
+
+\FloatBarrier
+
+# Purpose
+
+This file provides results of MR-SPLIT including type I error and power comparison when applying different split times.
+
+# Simulation
+
+This section provides the codes used to simulate the results.
+
+## Define Global Options
+
+Global R chunk options are defined in the YAML header but local chunk options will over-ride global options. We can temporarily disable an individual chunk by inserting `#| eval = FALSE` on a line at the top of the chunk. The method for creating a `cfsize` option that controls font size in code chunks and their text output is based on an answer to a question posted on [stackoverflow.com](https://stackoverflow.com/a/46526740).
+
+```{r}
+#| label: global-options
+#| cfsize: footnotesize
+
+# Create a custom chunk hook/option for controlling font size in chunk & output.
+# Global value for this is set in YAML header. 
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$cfsize != "normalsize", 
+         paste0("\n \\", options$cfsize,"\n\n", x, "\n\n \\normalsize"), 
+         x)
+  })
+```
+
+## Declare Path
+
+This next chunk declares the path to this script relative to the project-level root directory. If the file is not in the right location under the project root you'll get a warning message. This helps ensure relative paths are all working as expected.
+
+```{r}
+#| label: declare-path
+
+# Declare path to this script relative to the project root directory.
+here::i_am(path = paste0(params$SourceDir, params$SourceFile))
+```
+
+Note that `here()` creates a path relative to the location of the `EFNEPCBA.proj` file that will be portable across local repositories on different computers. That's why we use that function when specifying file paths throughout the script.
+
+\FloatBarrier
+
+## Load Packages
+
+Load R packages that we need to get additional functions.
+
+```{r}
+#| label: load-packages
+
+library(ivreg)
+library(MASS)
+library(ggplot2)
+library(hdi)
+library(glmnet)
+library(dplyr)
+library(qqman)
+library(screening)
+library(foreach)
+library(doParallel)
+library(kableExtra)
+library(quarto)           # for quarto_version()
+library(gridExtra)
+library(ggpattern)
+```
+
+\FloatBarrier
+
+## Setting
+
+The chunk below shows the settings.
+
+```{r}
+#| label: setting
+#| eval: true
+weightcal=function(weight){
+  len=length(weight)
+  a=(weight>=0)
+  b=abs(weight)/sum(abs(weight))
+  c=NULL
+  for(i in 1:len){
+    if(a[i])c[i]=b[i]
+    if(!a[i])c[i]=-1*b[i]
+  }
+  return(c)
+}
+#Y outcome, D exposure
+#Z instruments, X covariates
+J=300#number of SNPs
+J1=5 #useful SNPs
+N=1000 #sample size
+MAF=0.3 #minor allele frequency
+Times=1000
+sig=c(0.1,0.2)
+squareh=c(0.15,0.3,0.5)
+#pi=pi*c(1,-1,1,-1,1)
+beta=c(-0.08,0,0.08) #causal effect
+k=2
+```
+
+## Simulation
+
+The chunk below shows the simulation process of MR-SPLIT.
+
+```{r}
+#| label: simulate_MR_SPLIT
+#| eval: false
+set.seed(1)
+cl <- makeCluster(50)
+registerDoParallel(cl)
+
+#tt1=Sys.time()
+for(ss in 1:2){
+  for(jj in 1:3){
+    for(hh in 1:3){
+      results <- foreach(t=1:Times, .combine=rbind, .packages=c('ivreg','MASS','glmnet','screening')) %dopar% {
+        G=matrix(0,nrow=N,ncol=J)
+        for(i in 1:J){
+          maf=MAF[i%%length(MAF)]
+          if(i%%length(MAF)==0)maf=MAF[length(MAF)]
+          GG1=runif(N,min=0,max=1)
+          GG1[GG1<=(1-maf)^2]=0
+          GG1[GG1>(1-maf^2)]=2
+          GG1[which(GG1!=0&GG1!=2)]=1
+          G[,i]=GG1
+        }
+        Sigma=matrix(c(1,sig[ss],sig[ss],1),nrow=2,ncol=2)
+        sumsquarepi=squareh[hh]*Sigma[2,2]/(1-squareh[hh])/(2*MAF*(1-MAF))
+        pi0=sqrt(sumsquarepi*c(0.4,0.4,0.1,0.05,0.05))
+        error=mvrnorm(N,mu=c(0,0),Sigma=Sigma)
+        #randomly choose SNPs that generates the esposure
+        real=sample(c(1:J),size=J1,replace = FALSE)
+        Greal=G[,real]
+        #generate exposure
+        X=as.matrix(Greal)%*%as.matrix(pi0)+error[,1]
+        #generate outcome
+        Y=X*beta[jj]+error[,2]
+        
+        
+        #split sample
+        selected=NULL
+        unselected=1:N
+        n=sample(unselected,size=N/k,replace = FALSE)
+        selected=cbind(selected,n)
+        for(p in 1:k){
+          if(p<k){
+            n=sample(unselected[-selected],size=N/k,replace = FALSE)
+            selected=cbind(selected,n)
+          }
+        }
+        #select IVs using SIS
+        selectIV=list()
+        for(p in 1:k){
+          n=selected[,p]
+          if(J<N/2){
+            fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+          }
+          if(J>N/2){
+            fit=screening(G[-n,],X[-n],method = "sis")
+          }
+          selectIV[[p]]=fit$screen
+        }
+        #LASSO
+        weights=list()
+        for(p in 1:k){
+          n=selected[,p]
+          #select IVs 
+          lambda=cv.glmnet(G[-n,selectIV[[p]]],X[-n],alpha=1)$lambda.min
+          lasso=glmnet(G[-n,selectIV[[p]]],X[-n],lambda=lambda)
+          #coef of all IVs
+          a=coef(lasso)[-1,]
+          weights[[p]]=a[a!=0]
+          #selected IVs
+          selectIV[[p]]=selectIV[[p]][a!=0]
+        }
+        
+        #select major and weak based on partial F statistics
+        partialF=list()
+        for(p in 1:k){
+          n=selected[,p]
+          full=lm(X[-n]~G[-n,selectIV[[p]]])
+          Fs=NULL
+          if(length(selectIV[[p]])==1){
+            Fs=summary(lm(X[-n]~G[-n,selectIV[[p]]]))$fstat[1]
+          }
+          if(length(selectIV[[p]])>1){
+            for(q in 1:length(selectIV[[p]])){
+              reduced=lm(X[-n]~G[-n,selectIV[[p]][-q]])
+              Fs[q]=anova(reduced,full)$F[2]
+            }
+          }
+          partialF[[p]]=Fs
+        }
+        
+        selectmajorF30=list()
+        selectweakF30=list()
+        
+        for(p in 1:k){
+          selectmajorF30[[p]]=selectIV[[p]][partialF[[p]]>=30]
+          selectweakF30[[p]]=selectIV[[p]][partialF[[p]]<30]
+          
+        }
+        
+        #Get coef1
+        combineMajor1=list()
+        for(p in 1:k){
+          n=selected[,p]
+          weakwei1=weights[[p]][partialF[[p]]<30]
+          if(length(weakwei1)>1){
+            weakwei1=weightcal(weakwei1)
+            combineMajor1[[p]]=cbind(G[n,selectmajorF30[[p]]],G[n,selectweakF30[[p]]]%*%weakwei1)
+          } 
+          if(length(weakwei1)<=1) combineMajor1[[p]]=G[n,selectIV[[p]]]
+        }
+        
+        #MAJOR1
+        hatX=NULL
+        for(p in 1:k){
+          n=selected[,p]
+          fit=lm(X[n]~combineMajor1[[p]])
+          hatX=c(hatX,fit$fitted.values)
+        }
+        fit2=lm(Y[c(selected)]~hatX)
+        Major.all=c(summary(fit2)$coef[2,1:4])
+        return(Major.all)
+      }
+      write.table(results,file=paste0("2SLS/results/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt"))
+    }
+  }
+}
+
+stopCluster(cl)
+```
+
+The chunk below shows the simulation process of 2SLS and LIML.
+
+```{r}
+#| label: simulate_2SLS_LIML
+#| eval: false
+k=2
+set.seed(1)
+cl <- makeCluster(10)
+registerDoParallel(cl)
+
+for(ss in 1:2){
+  for(jj in 1:3){
+    for(hh in 1:3){
+results <- foreach(t=1:Times, .combine=rbind, .packages=c('ivreg','MASS','glmnet','screening','ivmodel')) %dopar% {
+  #generate SNPs
+  G=matrix(0,nrow=N,ncol=J)
+  for(i in 1:J){
+    maf=MAF[i%%length(MAF)]
+    if(i%%length(MAF)==0)maf=MAF[length(MAF)]
+    GG1=runif(N,min=0,max=1)
+    GG1[GG1<=(1-maf)^2]=0
+    GG1[GG1>(1-maf^2)]=2
+    GG1[which(GG1!=0&GG1!=2)]=1
+    G[,i]=GG1
+  }
+  Sigma=matrix(c(1,sig[ss],sig[ss],1),nrow=2,ncol=2)
+  sumsquarepi=squareh[hh]*Sigma[2,2]/(1-squareh[hh])/(2*MAF*(1-MAF))
+  pi0=sqrt(sumsquarepi*c(0.4,0.4,0.1,0.05,0.05))
+  error=mvrnorm(N,mu=c(0,0),Sigma=Sigma)
+  #randomly choose SNPs that generates the esposure
+  real=sample(c(1:J),size=J1,replace = FALSE)
+  Greal=G[,real]
+  #generate exposure
+  X=as.matrix(Greal)%*%as.matrix(pi0)+error[,1]
+  #generate outcome
+  Y=X*beta[jj]+error[,2]
+  
+  #TSLS and LIML
+        #split sample
+        selected=NULL
+        unselected=1:N
+        n=sample(unselected,size=N/k,replace = FALSE)
+        selected=cbind(selected,n)
+        for(p in 1:k){
+          if(p<k){
+            n=sample(unselected[-selected],size=N/k,replace = FALSE)
+            selected=cbind(selected,n)
+          }
+        }
+        
+  #select IVs using SIS
+  n=selected[,1]#used to estimate
+  selectIV=NULL
+  if(J<N/2){
+    fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+  }
+  if(J>N/2){
+    fit=screening(G[-n,],X[-n],method = "sis")
+  }
+  selectIV=fit$screen
+  #LASSO
+  #select IVs 
+  lambda=cv.glmnet(G[-n,selectIV],X[-n],alpha=1)$lambda.min
+  lasso=glmnet(G[-n,selectIV],X[-n],lambda=lambda)
+  #coef of all IVs
+  a=coef(lasso)[-1,]
+  #selected IVs
+  selectIV=selectIV[a!=0]
+  SNP=G[n,selectIV]
+  fit1=ivmodel(Y=Y[n],D=X[n],Z=SNP)
+  point.est1=c(fit1$kClass$point.est[2],fit1$kClass$std.err[2],fit1$kClass$test.stat[2],fit1$kClass$p.value[2])
+  point.est3=c(fit1$LIML$point.est,fit1$LIML$std.err,fit1$LIML$test.stat,fit1$LIML$p.value)
+  return(rbind(point.est1,point.est3))
+}
+      sumresult=list("TSLS"=results[c(seq(1,Times*2,by=2)),],"LIML"=results[c(seq(2,Times*2,by=2)),])
+write.table(sumresult,file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt"))
+    }
+  }
+}
+stopCluster(cl)
+```
+
+# Results
+
+## Boxplots of Estimates
+
+```{r fig.width=9, fig.height=3}
+setwd("C:/Users/shirx/OneDrive/Desktop/Major/Simulation study")
+for(ss in 1:2){
+  for(hh in 1:3){
+    par(mfrow=c(1,3),mar=c(2,2,2,1))
+    for(jj in 1:3){
+      file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+       file=paste0("results/2SLS/whole_sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data3=read.table(file = file,header = TRUE)
+      if(hh==1){
+        a=c(-0.8,0.8)
+      }
+      if(hh==2){
+        a=c(-0.3,0.3)
+      }
+      if(hh==3){
+        a=c(-0.2,0.2)
+      }
+      if(jj==1){
+        a=a-0.1
+        boxplot(data.frame("MR-SPLIT"=data2[,1],"LIML_h"=data1[,5],"2SLS_h"=data1[,1],"LIML_w"=data3[,5],"2SLS_w"=data3[,1],check.names = FALSE),main=expression(beta == -0.08),ylim=a)
+      }
+      if(jj==2){
+        boxplot(data.frame("MR-SPLIT"=data2[,1],"LIML_h"=data1[,5],"2SLS_h"=data1[,1],"LIML_w"=data3[,5],"2SLS_w"=data3[,1],check.names = FALSE),main=expression(beta == 0),ylim=a)
+      }
+       if(jj==3){
+         a=a+0.1
+        boxplot(data.frame("MR-SPLIT"=data2[,1],"LIML_h"=data1[,5],"2SLS_h"=data1[,1],"LIML_w"=data3[,5],"2SLS_w"=data3[,1],check.names = FALSE),main=expression(beta == 0.08),ylim=a)
+      }
+      abline(h=beta[jj],col="black")
+    }
+  }
+}
+
+```
+
+## Table
+
+```{r fig.width=6, fig.height=3}
+setwd("C:/Users/shirx/OneDrive/Desktop/Major/Simulation study")
+table=matrix(0,nrow=12,ncol=12)
+colnames(table)=c("h2","rho","beta","bias_M","bias_L","bias_2","Sd_M","Sd_L","Sd_2","CP_M","CP_L","CP_2")
+qq=c(1,3)
+  for(hh in 1:3){
+    for(ss in 1:2){
+    for(j in 1:2){
+      table[4*(hh-1)+2*(ss-1)+j,2]=sig[ss]
+      table[4*(hh-1)+2*(ss-1)+j,1]=squareh[hh]
+      jj=qq[j]
+      table[4*(hh-1)+2*(ss-1)+j,3]=beta[jj]
+      file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+       table[4*(hh-1)+2*(ss-1)+j,4:6]=c(mean(data2[,1]),mean(data1[,5]),mean(data1[,1]))
+       table[4*(hh-1)+2*(ss-1)+j,7:9]=c(sd(data2[,1]),sd(data1[,5]),sd(data1[,1]))
+       M.up=data2[,1]+data2[,2]*qnorm(0.975)
+       L.up=data1[,5]+data1[,6]*qnorm(0.975)
+       T.up=data1[,1]+data1[,2]*qnorm(0.975)
+       M.lo=data2[,1]-data2[,2]*qnorm(0.975)
+       L.lo=data1[,5]-data1[,6]*qnorm(0.975)
+       T.lo=data1[,1]-data1[,2]*qnorm(0.975)
+       table[4*(hh-1)+2*(ss-1)+j,10:12]=c(sum(beta[jj]<M.up&beta[jj]>M.lo),sum(beta[jj]<L.up&beta[jj]>L.lo),sum(beta[jj]<T.up&beta[jj]>T.lo))/Times
+    }
+  }
+  }
+for(j in 4:9){
+  table[,j]=round(table[,j],4)
+}
+kable(table, "html", caption = "Comparison between methods") %>%
+  kable_styling()
+```
+
+## Comparison of type I error
+
+```{r fig.width=7, fig.height=3}
+#| fig-cap: Comparison of Type I error between MR-SPLIT and CFMR in Scenario I
+#calculate type I error
+type.I=matrix(0,nrow=6,ncol=5)
+colnames(type.I)=c("sig","squareh","MR-SPLIT","LIML","2SLS")
+jj=2
+for(ss in 1:2){
+      par(mfrow=c(1,3),mar=c(2,2,2,1))
+  for(hh in 1:3){
+       file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+      type.I[3*(ss-1)+hh,]=c(ss,squareh[hh],sum(data2[,4]<0.05)/Times,sum(data1[,8]<0.05)/Times,sum(data1[,4]<0.05)/Times)
+    }
+  }
+
+type1=as.data.frame(type.I)
+type_I_long <- reshape2::melt(type1, id.vars = c("squareh", "sig"))
+
+colnames(type_I_long)[colnames(type_I_long) == "variable"] <- "Methods"
+
+type_I_long$sig=paste0("rho==",sig[type_I_long$sig])
+ggplot(type_I_long, aes(x = factor(squareh), y = value, fill = Methods)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "#b3b3b3") +
+  facet_wrap(~sig, labeller = labeller(sig = label_parsed)) +
+  geom_hline(yintercept = 0.05, color = "black", linetype = "dashed") +
+  labs(x = expression(h^2), y = "Type I error") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#b3b3b3","#666666")) +
+  theme_minimal()
+
+
+```
+
+## Comparison of power
+
+```{r fig.width=7, fig.height=3}
+#| fig-cap: Comparison of power between MR-SPLIT, LIML and 2SLS when beta=0.08
+#calculate power
+power=matrix(0,nrow=6,ncol=5)
+colnames(power)=c("sig","squareh","MR-SPLIT","LIML","2SLS")
+jj=3
+for(ss in 1:2){
+      par(mfrow=c(1,3),mar=c(2,2,2,1))
+  for(hh in 1:3){
+       file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+      power[3*(ss-1)+hh,]=c(ss,squareh[hh],sum(data2[,4]<0.05)/Times,sum(data1[,8]<0.05)/Times,sum(data1[,4]<0.05)/Times)
+    }
+  }
+
+power1=as.data.frame(power)
+power_long <- reshape2::melt(power1, id.vars = c("squareh", "sig"))
+power_long$sig=paste0("rho==",sig[power_long$sig])
+ggplot(power_long, aes(x = factor(squareh), y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(),color = "#b3b3b3") +
+  facet_wrap(~sig, labeller = labeller(sig = label_parsed)) +
+  labs(x = expression(h^2), y = "Power") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#b3b3b3","#666666")) +
+  theme_minimal()
+```
+
+```{r}
+kable(power1, "html", caption = "Comparison between methods") %>%
+  kable_styling()
+```
+
+```{r fig.width=7, fig.height=3}
+#| fig-cap: Comparison of power between MR-SPLIT, LIML and 2SLS when beta=-0.08
+jj=1
+for(ss in 1:2){
+      par(mfrow=c(1,3),mar=c(2,2,2,1))
+  for(hh in 1:3){
+       file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+      power[3*(ss-1)+hh,]=c(ss,squareh[hh],sum(data2[,4]<0.05)/Times,sum(data1[,8]<0.05)/Times,sum(data1[,4]<0.05)/Times)
+    }
+  }
+
+power1=as.data.frame(power)
+power_long <- reshape2::melt(power1, id.vars = c("squareh", "sig"))
+power_long$sig=paste0("rho==",sig[power_long$sig])
+ggplot(power_long, aes(x = factor(squareh), y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(),color="#b3b3b3") +
+  facet_wrap(~sig, labeller = labeller(sig = label_parsed)) +
+  labs(x = expression(h^2), y = "Power") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#b3b3b3","#666666")) +
+  theme_minimal()
+```
+
+```{r}
+kable(power1, "html", caption = "Comparison between methods") %>%
+  kable_styling()
+```
+
+## Comparison of RMSE
+
+```{r fig.width=7, fig.height=3}
+#| fig-cap: Comparison of RMSE between MR-SPLIT, LIML and 2SLS when beta=0.08
+#calculate RMSE
+RMSE=matrix(0,nrow=6,ncol=5)
+colnames(RMSE)=c("sig","squareh","MR-SPLIT","LIML","2SLS")
+jj=3
+for(ss in 1:2){
+      par(mfrow=c(1,3),mar=c(2,2,2,1))
+  for(hh in 1:3){
+       file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+      RMSE[3*(ss-1)+hh,]=c(ss,squareh[hh],sqrt(mean((data2[,1]-beta[jj])^2)),sqrt(mean((data1[,5]-beta[jj])^2)),sqrt(mean((data1[,1]-beta[jj])^2)))
+    }
+  }
+
+RMSE1=as.data.frame(RMSE)
+RMSE_long <- reshape2::melt(RMSE1, id.vars = c("squareh", "sig"))
+RMSE_long$sig=paste0("rho==",sig[RMSE_long$sig])
+ggplot(RMSE_long, aes(x = factor(squareh), y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(),color="#b3b3b3") +
+  facet_wrap(~sig, labeller = labeller(sig = label_parsed)) +
+  labs(x = expression(h^2), y = "RMSE") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#b3b3b3","#666666")) +
+  theme_minimal()
+```
+
+```{r}
+kable(RMSE1, "html", caption = "Comparison between methods") %>%
+  kable_styling()
+```
+
+```{r fig.width=7, fig.height=3}
+#| fig-cap: Comparison of RMSE between MR-SPLIT, LIML and 2SLS when beta=-0.08
+#calculate RMSE
+RMSE=matrix(0,nrow=6,ncol=5)
+colnames(RMSE)=c("sig","squareh","MR-SPLIT","LIML","2SLS")
+jj=1
+for(ss in 1:2){
+      par(mfrow=c(1,3),mar=c(2,2,2,1))
+  for(hh in 1:3){
+       file=paste0("results/2SLS/sumresult_2sls_ss",ss,"hh_",hh,"jj_",jj,"_.txt")
+      data1=read.table(file = file,header = TRUE)
+      file=paste0("results/2SLS/F30_sumresultMR_ss",ss,"_jj",jj,"_hh",hh,".txt")
+      data2=read.table(file = file,header = TRUE)
+      RMSE[3*(ss-1)+hh,]=c(ss,squareh[hh],sqrt(mean((data2[,1]-beta[jj])^2)),sqrt(mean((data1[,5]-beta[jj])^2)),sqrt(mean((data1[,1]-beta[jj])^2)))
+    }
+  }
+
+RMSE1=as.data.frame(RMSE)
+RMSE_long <- reshape2::melt(RMSE1, id.vars = c("squareh", "sig"))
+RMSE_long$sig=paste0("rho==",sig[RMSE_long$sig])
+ggplot(RMSE_long, aes(x = factor(squareh), y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(),color="#b3b3b3") +
+  facet_wrap(~sig, labeller = labeller(sig = label_parsed)) +
+  labs(x = expression(h^2), y = "RMSE") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values =  c("#e6e6e6", "#b3b3b3","#666666")) +
+  theme_minimal()
+```
+
+```{r}
+kable(RMSE1, "html", caption = "Comparison between methods") %>%
+  kable_styling()
+```
+
+# Software Information
+
+This section documents information that is important for reproducibility. Most users will not need to read it. It is primarily here for use by the statistician on the team.
+
+We used [R](https://www.r-project.org/) as our main computing environment and [Quarto](https://quarto.org/) scripts to enhance reproducibility. We used [RStudio](www.rstudio.org) as the editor to interface with R and Quarto.
+
+-   Software chain: **qmd file \> RStudio \> Quarto \> R \> knitr \> md file \> Pandoc \> html file**.
+-   Source file: **`r params$SourceFile`**
+-   Output file: **`r params$LogFile`**
+-   [Quarto `r quarto_version()`](https://quarto.org/) runs `*.qmd` files through [R](https://www.r-project.org/) and [knitr](https://yihui.org/knitr/) to produce `*.md` markdown files.
+-   [Pandoc `r rmarkdown::pandoc_version()`](https://pandoc.org) converts markdown files (`*.md`) to other formats, including LaTeX (`*.tex`) and HTML (`*.html`) among others.
+
+\FloatBarrier
+
+## Versions
+
+This document was generated using the following computational environment and dependencies:
+
+```{r}
+#| label: show-version
+#| cfsize: scriptsize
+#| echo: true
+
+# Get R and R package version numbers in use.
+devtools::session_info()
+```
+
+\FloatBarrier
