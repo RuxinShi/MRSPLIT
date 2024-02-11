@@ -211,12 +211,18 @@ filter_ld <- function(data1,data2) {
 ```
 
 ```{r}
+wd="C:/Users/shirx/OneDrive/Desktop/Major/Application on real data"
+setwd(wd)
 cova=read.table("../../msu/research/CRIC/derived data/white_covariates.txt",header = TRUE)
 Data=read.table("../../msu/research/CRIC/derived data/all data(dummy).txt",header = TRUE)
 whiteID=read.table("../../msu/research/CRIC/derived data/whiteID.txt")
 onlywhite=makeequal(as.character(Data[,1]),as.character(whiteID))
 Data=Data[onlywhite[[1]],]
-X=Data[,4]#EGFR,continuous
+EGFR=read.table("../../proposal/gene expression/graph_data_from_visit_level.txt",header = TRUE)
+onlywhite2=makeequal(as.character(EGFR$ID),as.character(Data$PID))
+EGFR=EGFR[onlywhite2[[1]],]
+
+X=EGFR$EGFR_CRIC#EGFR,continuous
 Y=Data[,2]#ATRH,binary
 hist(X,main = "histogram of EGFR")
 A=summary(as.factor(Y))
@@ -329,13 +335,13 @@ for(j in 1:split.time){
   point.est1[j,]=summary(fit1)$coef[2,1:4]
   
 }
-write.table(point.est1,"results/egfr_atrh.txt",row.names = FALSE)
-write.table(cbind(num.major,num.weak),"results/egfr_atrh_num_IVs.txt",row.names = FALSE)
+write.table(point.est1,"results/egfr_atrh_raw.txt",row.names = FALSE)
+write.table(cbind(num.major,num.weak),"results/egfr_atrh_num_IVs_raw.txt",row.names = FALSE)
 
 ```
 
 ```{r fig.height=4,fig.width=5}
-MR_SPLIT=read.table("results/egfr_atrh.txt",header = TRUE)
+MR_SPLIT=read.table("results/egfr_atrh_raw.txt",header = TRUE)
 hist(MR_SPLIT[,4],main=NULL,breaks = 20,ylim=c(0,50),xlab = "p-values out of 50 sample splits")
 #abline(v = 0.05, col = "black", lty = 2)
 legend("topright", legend = expression("combined p-value=" * 3.516 %*% 10^-5), col = "black", cex = 0.8, bty = "n")
@@ -348,8 +354,15 @@ hist(MR_SPLIT[,1], breaks = 20, main = NULL,
      xlab = expression("Causal estimates (" * hat(beta) * ") out of 50 sample splits."))
 
 abline(v = mean(MR_SPLIT[,1]), col = "black", lty = 2)
-legend("topright", legend = expression(hat(beta) == -0.5385), lty = 2, col = "black", cex = 0.8, bty = "n")
+legend("topright", legend = expression(hat(beta) == -0.0352), lty = 2, col = "black", cex = 0.8, bty = "n")
+
 print(mean(MR_SPLIT[,1]))
+
+hist(exp(MR_SPLIT[,1]), breaks = 20, main = NULL, 
+     xlab = expression("Causal estimates (" * hat(OR) * ") out of 50 sample splits."))
+
+abline(v = mean(exp(MR_SPLIT[,1])), col = "black", lty = 2)
+legend("topright", legend = "OR=0.9654", lty = 2, col = "black", cex = 0.8, bty = "n")
 ```
 
 ### CFMR
@@ -395,11 +408,11 @@ k=10
     fit1=glm(Y[ord]~first1$fitted.values,family = binomial(link = "logit"))
   CFMR=c(summary(fit1)$coef[2,c(1:4)])
 }
-write.table(CFMR,"results/CFMR_egfr_atrh.txt",row.names = FALSE)
+write.table(CFMR,"results/CFMR_egfr_atrh_raw.txt",row.names = FALSE)
 ```
 
 ```{r}
-CFMR=read.table("results/CFMR_egfr_atrh.txt",header = TRUE)
+CFMR=read.table("results/CFMR_egfr_atrh_raw.txt",header = TRUE)
 rownames(CFMR)=c("Estimate","Std. Error","t value","Pr(>|t|)")
 kable(round(CFMR,4), "html", col.names = c("CFMR"),caption = "Results of CFMR") %>%
   kable_styling()
