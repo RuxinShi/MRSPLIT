@@ -1,0 +1,825 @@
+---
+title: Lasso v.s. Lasso projection
+author: 
+  - name: Ruxin Shi
+    orcid: 0009-0001-9483-6444
+    email: shiruxin@msu.edu
+    affiliations: 
+      - name: Michigan State University, Statistics and Probability
+params:
+  SourceDir: "Simulation study/"
+  SourceFile: "Lasso v.s. Lasso proj.qmd"
+  LogFile: "Lasso v.s. Lasso proj.html"
+date: now
+date-modified: last-modified
+date-format: YYYY-MM-DD HH:mm:ss z
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    number-sections: true
+    number-depth: 3
+    code-fold: true
+    code-tools: true
+    code-line-numbers: false
+    embed-resources: true 
+    anchor-sections: true
+execute:
+  eval: true
+  echo: fenced
+  output: true
+  message: true
+  warning: false
+  error: true
+  include: true
+knitr:
+  opts_chunk: 
+    message: true 
+    cfsize: "scriptsize"
+---
+
+```{=tex}
+\begin{comment}
+# Hidden: Notes for User
+This script makes use of the LaTeX `verbatim` package's `\comment` command to
+build in hidden headings and text that are here for the team preparing the
+report but will be omitted from the knitted PDF output file. This makes it
+easier to put important comments directly in the file while still creating fully
+formatted output that only shows the desired content. So, text inside a comment
+block will be omitted from the PDF output.
+
+We can also use code chunks with chunk options such as `#| include: false`, 
+`#| echo: false`, `#| message: false`, `#| warning: false` and so on to 
+precisely control what R output shows up in the final PDF file. Thus, a script 
+file can both serve as process documentation and efficiently generate the final 
+version of a report output by applying the reproducible research and literate
+programming concepts and tools. 
+
+The `\lfoot` command just below sets the left footer to match the script's 
+`LofgFile` parameter value, which we can pass along when rendering the script. 
+Ideally it would be in the YAML `include-in-header:` with other pieces, but
+I can't get inline code to work if I do it that way. This is the only way I 
+could get the filename-based footer to work. 
+
+The LaTeX `placeins` package provides the `\FloatBarrier` command. Using that 
+before section headings help keep the figures and tables in their respective 
+sections. 
+\end{comment}
+```
+\lfoot{\texttt{\small \detokenize{`r params$LogFile`}}}
+
+\FloatBarrier
+
+# Simulation
+
+This section provides the codes used to simulate the results.
+
+## Define Global Options
+
+Global R chunk options are defined in the YAML header but local chunk options will over-ride global options. We can temporarily disable an individual chunk by inserting `#| eval = FALSE` on a line at the top of the chunk. The method for creating a `cfsize` option that controls font size in code chunks and their text output is based on an answer to a question posted on [stackoverflow.com](https://stackoverflow.com/a/46526740).
+
+```{r}
+#| label: global-options
+#| cfsize: footnotesize
+
+# Create a custom chunk hook/option for controlling font size in chunk & output.
+# Global value for this is set in YAML header. 
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$cfsize != "normalsize", 
+         paste0("\n \\", options$cfsize,"\n\n", x, "\n\n \\normalsize"), 
+         x)
+  })
+```
+
+## Load Packages
+
+Load R packages that we need to get additional functions.
+
+```{r}
+#| label: load-packages
+
+library(ivreg)
+library(MASS)
+library(ggplot2)
+library(hdi)
+library(glmnet)
+library(dplyr)
+library(qqman)
+library(screening)
+library(foreach)
+library(doParallel)
+library(kableExtra)
+library(quarto)           # for quarto_version()
+library(gridExtra)
+library(patchwork)
+```
+
+\FloatBarrier
+
+## Setting
+
+The chunk below shows the settings.
+
+```{r}
+#| label: setting
+#| eval: true
+weightcal=function(weight){
+  len=length(weight)
+  a=(weight>=0)
+  b=abs(weight)/sum(abs(weight))
+  c=NULL
+  for(i in 1:len){
+    if(a[i])c[i]=b[i]
+    if(!a[i])c[i]=-1*b[i]
+  }
+  return(c)
+}
+#Y outcome, D exposure
+#Z instruments, X covariates
+J=300 #number of SNPs
+J1=5 #useful SNPs
+N=1000 #sample size
+MAF=0.3 #minor allele frequency
+Times=1000
+Split=50
+sig=0.08
+squareh=0.2
+ratio=c(0.4,0.4,0.1,0.05,0.05)#weights of SNPs
+beta=c(-0.08,0,0.08) #causal effect
+k=2#2-fold
+```
+
+## Simulation
+
+The chunk below shows the simulation process of MR-SPLIT with lasso projection.
+
+```{r}
+#| label: simulate_MR_SPLIT
+#| eval: false
+set.seed(2)
+cl <- makeCluster(50)
+registerDoParallel(cl)
+
+#tt1=Sys.time()
+    for(jj in 1:3){
+        results <- foreach(t=1:Times, .combine=rbind, .packages=c('ivreg','MASS','glmnet','screening','ivmodel')) %dopar% {
+          set.seed(t)
+          G=matrix(0,nrow=N,ncol=J)
+          for(i in 1:J){
+            maf=MAF[i%%length(MAF)]
+            if(i%%length(MAF)==0)maf=MAF[length(MAF)]
+            GG1=runif(N,min=0,max=1)
+            GG1[GG1<=(1-maf)^2]=0
+            GG1[GG1>(1-maf^2)]=2
+            GG1[which(GG1!=0&GG1!=2)]=1
+            G[,i]=GG1
+          }
+          Sigma=matrix(c(5,sig,sig,5),nrow=2,ncol=2)
+          sumsquarepi=squareh*Sigma[2,2]/(1-squareh)/(2*MAF*(1-MAF))
+          pi0=sqrt(sumsquarepi*ratio)
+          error=mvrnorm(N,mu=c(0,0),Sigma=Sigma)
+          real=sample(c(1:J),size=J1,replace = FALSE)
+          Greal=G[,real]
+          X=as.matrix(Greal)%*%as.matrix(pi0)+error[,1]
+          Y=X*beta[jj]+error[,2]
+          
+          #split sample
+          selected=NULL
+          unselected=1:N
+          n=sample(unselected,size=N/k,replace = FALSE)
+          selected=cbind(selected,n)
+          for(p in 1:k){
+            if(p<k){
+              n=sample(unselected[-selected],size=N/k,replace = FALSE)
+              selected=cbind(selected,n)
+            }
+          }
+          #select IVs using SIS
+          selectIV=list()
+          for(p in 1:k){
+            n=selected[,p]
+            if(J<N/2){
+              fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+            }
+            if(J>N/2){
+              fit=screening(G[-n,],X[-n],method = "sis")
+            }
+            selectIV[[p]]=fit$screen
+          }
+          #LASSO
+          weights=list()
+          for(p in 1:k){
+            n=selected[,p]
+            C=lasso.proj(x=G[-n,selectIV[[p]]],y=X[-n])
+            selectIV[[p]]=selectIV[[p]][C$pval<=0.05]
+    
+            lasso.fit=lm(X[-n]~G[-n,selectIV[[p]]])
+            weights[[p]]=summary(lasso.fit)$coef[-1,1]
+          }
+          
+          #select major and weak based on partial F statistics
+          partialF=list()
+          for(p in 1:k){
+            n=selected[,p]
+            full=lm(X[-n]~G[-n,selectIV[[p]]])
+            Fs=NULL
+            if(length(selectIV[[p]])==1){
+              Fs=summary(lm(X[-n]~G[-n,selectIV[[p]]]))$fstat[1]
+            }
+            if(length(selectIV[[p]])>1){
+              for(q in 1:length(selectIV[[p]])){
+                reduced=lm(X[-n]~G[-n,selectIV[[p]][-q]])
+                Fs[q]=anova(reduced,full)$F[2]
+              }
+            }
+            partialF[[p]]=Fs
+          }
+          
+          num.major=NULL
+          num.weak=NULL
+          selectmajorF30=list()
+          selectweakF30=list()
+          
+          for(p in 1:k){
+            selectmajorF30[[p]]=selectIV[[p]][partialF[[p]]>=30]
+            selectweakF30[[p]]=selectIV[[p]][partialF[[p]]<30]
+            num.major=c(num.major,sum(partialF[[p]]>=30))
+            num.weak=c(num.weak,sum(partialF[[p]]<30))
+          }
+          
+          #Get coef1
+          combineMajor1=list()
+          for(p in 1:k){
+            n=selected[,p]
+            weakwei1=weights[[p]][partialF[[p]]<30]
+            if(length(weakwei1)>1){
+              weakwei1=weightcal(weakwei1)
+              combineMajor1[[p]]=cbind(G[n,selectmajorF30[[p]]],G[n,selectweakF30[[p]]]%*%weakwei1)
+            } 
+            if(length(weakwei1)<=1) combineMajor1[[p]]=G[n,selectIV[[p]]]
+          }
+        
+          #MAJOR1
+          hatX=NULL
+          for(p in 1:k){
+            n=selected[,p]
+            fit=lm(X[n]~combineMajor1[[p]])
+            hatX=c(hatX,fit$fitted.values)
+          }
+          fit2=lm(Y[c(selected)]~hatX)
+          Major.all1=matrix(NA,ncol=4,nrow=Split)
+          Major.all1[1,]=c(summary(fit2)$coef[2,1:4])
+          
+          for(S in 2:Split){
+            selected=NULL
+            unselected=1:N
+            n=sample(unselected,size=N/k,replace = FALSE)
+            selected=cbind(selected,n)
+            for(p in 1:k){
+              if(p<k){
+                n=sample(unselected[-selected],size=N/k,replace = FALSE)
+                selected=cbind(selected,n)
+              }
+            }
+            #select IVs using SIS
+            selectIV=list()
+            for(p in 1:k){
+              n=selected[,p]
+              if(J<N/2){
+                fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+              }
+              if(J>N/2){
+                fit=screening(G[-n,],X[-n],method = "sis")
+              }
+              selectIV[[p]]=fit$screen
+            }
+            #LASSO
+          weights=list()
+          for(p in 1:k){
+            n=selected[,p]
+            C=lasso.proj(x=G[-n,selectIV[[p]]],y=X[-n])
+            selectIV[[p]]=selectIV[[p]][C$pval<=0.05]
+    
+            lasso.fit=lm(X[-n]~G[-n,selectIV[[p]]])
+            weights[[p]]=summary(lasso.fit)$coef[-1,1]
+          }
+          
+            
+            #select major and weak based on partial F statistics
+            partialF=list()
+            for(p in 1:k){
+              n=selected[,p]
+              full=lm(X[-n]~G[-n,selectIV[[p]]])
+              Fs=NULL
+              if(length(selectIV[[p]])==1){
+                Fs=summary(lm(X[-n]~G[-n,selectIV[[p]]]))$fstat[1]
+              }
+              if(length(selectIV[[p]])>1){
+                for(q in 1:length(selectIV[[p]])){
+                  reduced=lm(X[-n]~G[-n,selectIV[[p]][-q]])
+                  Fs[q]=anova(reduced,full)$F[2]
+                }
+              }
+              partialF[[p]]=Fs
+            }
+            
+            selectmajorF30=list()
+            selectweakF30=list()
+            
+            for(p in 1:k){
+              selectmajorF30[[p]]=selectIV[[p]][partialF[[p]]>=30]
+              selectweakF30[[p]]=selectIV[[p]][partialF[[p]]<30]
+               num.major=c(num.major,sum(partialF[[p]]>=30))
+               num.weak=c(num.weak,sum(partialF[[p]]<30))
+        
+            }
+            
+            #Get coef1
+            combineMajor1=list()
+            for(p in 1:k){
+              n=selected[,p]
+              weakwei1=weights[[p]][partialF[[p]]<30]
+              if(length(weakwei1)>1){
+                weakwei1=weightcal(weakwei1)
+                combineMajor1[[p]]=cbind(G[n,selectmajorF30[[p]]],G[n,selectweakF30[[p]]]%*%weakwei1)
+              } 
+              if(length(weakwei1)<=1) combineMajor1[[p]]=G[n,selectIV[[p]]]
+            }
+           
+            #MAJOR1
+            hatX=NULL
+            for(p in 1:k){
+              n=selected[,p]
+              fit=lm(X[n]~combineMajor1[[p]])
+              hatX=c(hatX,fit$fitted.values)
+            }
+            fit2=lm(Y[c(selected)]~hatX)
+            Major.all1=matrix(NA,ncol=4,nrow=Split)
+            Major.all1[1,]=c(summary(fit2)$coef[2,1:4])
+          }
+          T1=mean(tan((0.5-Major.all1[,4])*pi))
+          p1=0.5-atan(T1)/pi
+          point.est1_t=c(mean(Major.all1[,1]),p1)
+          
+          
+          return(c(point.est1_t,mean(num.major),mean(num.weak)))
+        }
+        write.table(results,file=paste0("results/lasso proj_jj",jj,".txt"))
+      }
+
+stopCluster(cl)
+```
+
+The chunk below shows the simulation process of MR-SPLIT with lasso.
+```{r}
+#| label: simulate_MR_SPLIT_lasso
+#| eval: false
+set.seed(2)
+cl <- makeCluster(50)
+registerDoParallel(cl)
+
+#tt1=Sys.time()
+    for(jj in 1:3){
+        results <- foreach(t=1:Times, .combine=rbind, .packages=c('ivreg','MASS','glmnet','screening','ivmodel','hdi')) %dopar% {
+          set.seed(t)
+          G=matrix(0,nrow=N,ncol=J)
+          for(i in 1:J){
+            maf=MAF[i%%length(MAF)]
+            if(i%%length(MAF)==0)maf=MAF[length(MAF)]
+            GG1=runif(N,min=0,max=1)
+            GG1[GG1<=(1-maf)^2]=0
+            GG1[GG1>(1-maf^2)]=2
+            GG1[which(GG1!=0&GG1!=2)]=1
+            G[,i]=GG1
+          }
+          Sigma=matrix(c(5,sig,sig,5),nrow=2,ncol=2)
+          sumsquarepi=squareh*Sigma[2,2]/(1-squareh)/(2*MAF*(1-MAF))
+          pi0=sqrt(sumsquarepi*ratio)
+          error=mvrnorm(N,mu=c(0,0),Sigma=Sigma)
+          real=sample(c(1:J),size=J1,replace = FALSE)
+          Greal=G[,real]
+          X=as.matrix(Greal)%*%as.matrix(pi0)+error[,1]
+          Y=X*beta[jj]+error[,2]
+          
+          #split sample
+          selected=NULL
+          unselected=1:N
+          n=sample(unselected,size=N/k,replace = FALSE)
+          selected=cbind(selected,n)
+          for(p in 1:k){
+            if(p<k){
+              n=sample(unselected[-selected],size=N/k,replace = FALSE)
+              selected=cbind(selected,n)
+            }
+          }
+          #select IVs using SIS
+          selectIV=list()
+          for(p in 1:k){
+            n=selected[,p]
+            if(J<N/2){
+              fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+            }
+            if(J>N/2){
+              fit=screening(G[-n,],X[-n],method = "sis")
+            }
+            selectIV[[p]]=fit$screen
+          }
+
+            #LASSO
+        weights=list()
+        for(p in 1:k){
+          n=selected[,p]
+          #select IVs 
+          lambda=cv.glmnet(G[-n,selectIV[[p]]],X[-n],alpha=1)$lambda.min
+          lasso=glmnet(G[-n,selectIV[[p]]],X[-n],lambda=lambda)
+          #coef of all IVs
+          a=coef(lasso)[-1,]
+          weights[[p]]=a[a!=0]
+          #selected IVs
+          selectIV[[p]]=selectIV[[p]][a!=0]
+        }
+       
+          #select major and weak based on partial F statistics
+          partialF=list()
+          for(p in 1:k){
+            n=selected[,p]
+            full=lm(X[-n]~G[-n,selectIV[[p]]])
+            Fs=NULL
+            if(length(selectIV[[p]])==1){
+              Fs=summary(lm(X[-n]~G[-n,selectIV[[p]]]))$fstat[1]
+            }
+            if(length(selectIV[[p]])>1){
+              for(q in 1:length(selectIV[[p]])){
+                reduced=lm(X[-n]~G[-n,selectIV[[p]][-q]])
+                Fs[q]=anova(reduced,full)$F[2]
+              }
+            }
+            partialF[[p]]=Fs
+          }
+          
+          num.major=NULL
+          num.weak=NULL
+          selectmajorF30=list()
+          selectweakF30=list()
+          
+          for(p in 1:k){
+            selectmajorF30[[p]]=selectIV[[p]][partialF[[p]]>=30]
+            selectweakF30[[p]]=selectIV[[p]][partialF[[p]]<30]
+            num.major=c(num.major,sum(partialF[[p]]>=30))
+            num.weak=c(num.weak,sum(partialF[[p]]<30))
+          }
+          
+          #Get coef1
+          combineMajor1=list()
+          for(p in 1:k){
+            n=selected[,p]
+            weakwei1=weights[[p]][partialF[[p]]<30]
+            if(length(weakwei1)>1){
+              weakwei1=weightcal(weakwei1)
+              combineMajor1[[p]]=cbind(G[n,selectmajorF30[[p]]],G[n,selectweakF30[[p]]]%*%weakwei1)
+            } 
+            if(length(weakwei1)<=1) combineMajor1[[p]]=G[n,selectIV[[p]]]
+          }
+        
+          #MAJOR1
+          hatX=NULL
+          for(p in 1:k){
+            n=selected[,p]
+            fit=lm(X[n]~combineMajor1[[p]])
+            hatX=c(hatX,fit$fitted.values)
+          }
+          fit2=lm(Y[c(selected)]~hatX)
+          Major.all1=matrix(NA,ncol=4,nrow=Split)
+          Major.all1[1,]=c(summary(fit2)$coef[2,1:4])
+          
+          for(S in 2:Split){
+            selected=NULL
+            unselected=1:N
+            n=sample(unselected,size=N/k,replace = FALSE)
+            selected=cbind(selected,n)
+            for(p in 1:k){
+              if(p<k){
+                n=sample(unselected[-selected],size=N/k,replace = FALSE)
+                selected=cbind(selected,n)
+              }
+            }
+            #select IVs using SIS
+            selectIV=list()
+            for(p in 1:k){
+              n=selected[,p]
+              if(J<N/2){
+                fit=screening(G[-n,],X[-n],method = "sis",num.select = 100)
+              }
+              if(J>N/2){
+                fit=screening(G[-n,],X[-n],method = "sis")
+              }
+              selectIV[[p]]=fit$screen
+            }
+          #LASSO
+        weights=list()
+        for(p in 1:k){
+          n=selected[,p]
+          #select IVs 
+          lambda=cv.glmnet(G[-n,selectIV[[p]]],X[-n],alpha=1)$lambda.min
+          lasso=glmnet(G[-n,selectIV[[p]]],X[-n],lambda=lambda)
+          #coef of all IVs
+          a=coef(lasso)[-1,]
+          weights[[p]]=a[a!=0]
+          #selected IVs
+          selectIV[[p]]=selectIV[[p]][a!=0]
+        }
+            
+            #select major and weak based on partial F statistics
+            partialF=list()
+            for(p in 1:k){
+              n=selected[,p]
+              full=lm(X[-n]~G[-n,selectIV[[p]]])
+              Fs=NULL
+              if(length(selectIV[[p]])==1){
+                Fs=summary(lm(X[-n]~G[-n,selectIV[[p]]]))$fstat[1]
+              }
+              if(length(selectIV[[p]])>1){
+                for(q in 1:length(selectIV[[p]])){
+                  reduced=lm(X[-n]~G[-n,selectIV[[p]][-q]])
+                  Fs[q]=anova(reduced,full)$F[2]
+                }
+              }
+              partialF[[p]]=Fs
+            }
+            
+            selectmajorF30=list()
+            selectweakF30=list()
+            
+            for(p in 1:k){
+              selectmajorF30[[p]]=selectIV[[p]][partialF[[p]]>=30]
+              selectweakF30[[p]]=selectIV[[p]][partialF[[p]]<30]
+               num.major=c(num.major,sum(partialF[[p]]>=30))
+               num.weak=c(num.weak,sum(partialF[[p]]<30))
+        
+            }
+            
+            #Get coef1
+            combineMajor1=list()
+            for(p in 1:k){
+              n=selected[,p]
+              weakwei1=weights[[p]][partialF[[p]]<30]
+              if(length(weakwei1)>1){
+                weakwei1=weightcal(weakwei1)
+                combineMajor1[[p]]=cbind(G[n,selectmajorF30[[p]]],G[n,selectweakF30[[p]]]%*%weakwei1)
+              } 
+              if(length(weakwei1)<=1) combineMajor1[[p]]=G[n,selectIV[[p]]]
+            }
+           
+            #MAJOR1
+            hatX=NULL
+            for(p in 1:k){
+              n=selected[,p]
+              fit=lm(X[n]~combineMajor1[[p]])
+              hatX=c(hatX,fit$fitted.values)
+            }
+            fit2=lm(Y[c(selected)]~hatX)
+            Major.all1=matrix(NA,ncol=4,nrow=Split)
+            Major.all1[1,]=c(summary(fit2)$coef[2,1:4])
+          }
+          T1=mean(tan((0.5-Major.all1[,4])*pi))
+          p1=0.5-atan(T1)/pi
+          point.est1_t=c(mean(Major.all1[,1]),p1)
+          
+          
+          return(c(point.est1_t,mean(num.major),mean(num.weak)))
+        }
+        write.table(results,file=paste0("results/lasso_jj",jj,".txt"))
+      }
+
+stopCluster(cl)
+```
+
+
+# Results
+## Load data
+
+```{r fig.width=6, fig.height=3}
+#setwd("C:/Users/shirx/OneDrive/Desktop/msu/research/Major/Simulation study/lasso")
+aa=1
+data_lasso=list()
+for(jj in c(1:3)){
+      file=paste0("results/lasso_jj",jj,".txt")
+      data_lasso[[aa]]=read.table(file = file,header = TRUE)
+      aa=aa+1
+}
+```
+
+```{r}
+aa=1
+data_lasso_proj=list()
+for(jj in c(1:3)){
+      file=paste0("results/lasso proj_jj",jj,".txt")
+      data_lasso_proj[[aa]]=read.table(file = file,header = TRUE)
+      aa=aa+1
+}
+```
+
+## Boxplots of Estimates
+
+```{r fig.width=9, fig.height=3}
+  # 用于排列多个图形
+
+plots <- list()  # 创建一个列表来保存所有的ggplot对象
+
+for(jj in 1:3) {
+  data1 <- data_lasso[[jj]]
+  data2 <- data_lasso_proj[[jj]]
+  real.beta <- beta[jj]
+  
+  df <- data.frame(Value = c(data1[, 1], data2[, 1]),
+                   Method = rep(c("LASSO", "LASSO_proj"), each = length(data1[, 1])))
+
+  # 创建ggplot对象
+  p <- ggplot(df, aes(x = Method, y = Value)) +
+    geom_boxplot() +
+    geom_hline(yintercept = real.beta, color = "red") +
+    ylim(-0.35, 0.35) +
+    labs(title = bquote(beta == .(real.beta)), y = "", x = "") +
+    theme_minimal()
+  
+  plots[[jj]] <- p  # 将ggplot对象添加到列表中
+}
+
+# 使用grid.arrange()从gridExtra包排列所有图形
+do.call(grid.arrange, c(plots, ncol = 3))
+
+```
+## Comparison of type I error
+
+```{r fig.width=4, fig.height=5}
+#| fig-cap: Comparison of Type I error between LASSO and LASSO.proj
+#calculate type I error
+jj=2
+type.I.long <- data.frame(
+  Method = rep(c("LASSO", "LASSO_proj"), each = 1),
+  Value = c(sum(data_lasso[[jj]][,2]<0.05),sum(data_lasso_proj[[jj]][,2]<0.05))/1000  
+)
+
+# Create a histogram using ggplot
+ggplot(type.I.long, aes(x = Method, y = Value)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
+  ylim(0, 0.075) +  
+  labs(title = NULL, x = "Method", y = "Type I Error Rate") +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(size = 20),   # 调整主标题字体大小
+    axis.title = element_text(size = 16),   # 调整轴标题字体大小
+    axis.text = element_text(size = 14),    # 调整轴文本标签字体大小
+    legend.title = element_text(size = 14), # 调整图例标题字体大小
+    legend.text = element_text(size = 12)   # 调整图例文本标签字体大小
+  )
+
+
+```
+
+## Comparison of power
+
+```{r fig.width=7, fig.height=6}
+#| fig-cap: Comparison of power between LASSO and LASSO.proj
+#calculate power
+
+power.long <- data.frame(
+  Method = rep(c("LASSO", "LASSO_proj"), each = 1),
+  Value = c(sum(data_lasso[[1]][,2]<0.05),sum(data_lasso_proj[[1]][,2]<0.05),sum(data_lasso[[3]][,2]<0.05),sum(data_lasso_proj[[3]][,2]<0.05))/1000,
+  beta=c(rep(c(-0.08,0.08),each=2))
+)
+
+ggplot(power.long, aes(x = Method, y = Value, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "#b3b3b3") +
+  facet_wrap(~beta, labeller = labeller(beta = label_parsed)) +
+  labs(x = "Method", y = "Power") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#666666")) +  # 调整颜色以匹配数据
+  theme_minimal()+
+  theme(
+    strip.text = element_text(size = 14),   # 调整分面标签字体大小
+    plot.title = element_text(size = 20),   # 调整主标题字体大小
+    axis.title = element_text(size = 16),   # 调整轴标题字体大小
+    axis.text = element_text(size = 14),    # 调整轴文本标签字体大小
+    legend.title = element_text(size = 14), # 调整图例标题字体大小
+    legend.text = element_text(size = 12)   # 调整图例文本标签字体大小
+  )
+
+```
+
+## Comparison of RMSE
+
+```{r fig.width=7, fig.height=6}
+#| fig-cap: Comparison of RMSE between LASSO and LASSO.proj
+#calculate RMSE
+
+RMSE.long <- data.frame(
+  Method = rep(c("LASSO", "LASSO_proj"), each = 1),
+  Value = c(sqrt(mean((data_lasso[[1]][,1]-beta[1])^2)),sqrt(mean((data_lasso_proj[[1]][,1]-beta[1])^2)),sqrt(mean((data_lasso[[3]][,1]-beta[3])^2)),sqrt(mean((data_lasso_proj[[3]][,1]-beta[3])^2))),
+  beta=c(rep(c(-0.08,0.08),each=2))
+)
+
+ggplot(RMSE.long, aes(x = Method, y = Value, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "#b3b3b3") +
+  facet_wrap(~beta, labeller = labeller(beta = label_parsed)) +
+  labs(x = "Method", y = "RMSE") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#666666")) +  # 调整颜色以匹配数据
+  theme_minimal()+
+  theme(
+    strip.text = element_text(size = 14),   # 调整分面标签字体大小
+    plot.title = element_text(size = 20),   # 调整主标题字体大小
+    axis.title = element_text(size = 16),   # 调整轴标题字体大小
+    axis.text = element_text(size = 14),    # 调整轴文本标签字体大小
+    legend.title = element_text(size = 14), # 调整图例标题字体大小
+    legend.text = element_text(size = 12)   # 调整图例文本标签字体大小
+  )
+```
+
+## IV selected  
+```{r fig.width=9, fig.height=6}
+#| fig-cap: Comparison of numbers of IVs selected between LASSO and LASSO.proj
+#calculate numbers of IVs
+
+Num_IV.long <- data.frame(
+  Method = rep(c("LASSO", "LASSO_proj"), each = 1),
+  Value = c(sum(data_lasso[[1]][,c(3:4)]),sum(data_lasso_proj[[1]][,c(3:4)]),sum(data_lasso[[2]][,c(3:4)]),sum(data_lasso_proj[[2]][,c(3:4)]),sum(data_lasso[[3]][,c(3:4)]),sum(data_lasso_proj[[3]][,c(3:4)]))/1000,
+  beta=c(rep(c(-0.08,0,0.08),each=2))
+)
+
+ggplot(Num_IV.long, aes(x = Method, y = Value, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "#b3b3b3") +
+  facet_wrap(~beta, labeller = labeller(beta = label_parsed)) +
+  labs(x = "Method", y = "Numbers of IVs") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#666666")) +  # 调整颜色以匹配数据
+  theme_minimal()+
+  theme(
+    strip.text = element_text(size = 14),   # 调整分面标签字体大小
+    plot.title = element_text(size = 20),   # 调整主标题字体大小
+    axis.title = element_text(size = 16),   # 调整轴标题字体大小
+    axis.text = element_text(size = 14),    # 调整轴文本标签字体大小
+    legend.title = element_text(size = 14), # 调整图例标题字体大小
+    legend.text = element_text(size = 12)   # 调整图例文本标签字体大小
+  )
+```
+
+```{r fig.width=9, fig.height=6}
+#| fig-cap: Comparison of numbers of major IVs selected between LASSO and LASSO.proj
+#calculate numbers of IVs
+
+Num_IV.long <- data.frame(
+  Method = rep(c("LASSO", "LASSO_proj"), each = 1),
+  Value = c(sum(data_lasso[[1]][,3]),sum(data_lasso_proj[[1]][,3]),sum(data_lasso[[2]][,3]),sum(data_lasso_proj[[2]][,3]),sum(data_lasso[[3]][,3]),sum(data_lasso_proj[[3]][,3]))/1000,
+  beta=c(rep(c(-0.08,0,0.08),each=2))
+)
+
+ggplot(Num_IV.long, aes(x = Method, y = Value, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "#b3b3b3") +
+  facet_wrap(~beta, labeller = labeller(beta = label_parsed)) +
+  labs(x = "Method", y = "Numbers of major IVs") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = c("#e6e6e6", "#666666")) +  # 调整颜色以匹配数据
+  theme_minimal()+
+  theme(
+    strip.text = element_text(size = 14),   # 调整分面标签字体大小
+    plot.title = element_text(size = 20),   # 调整主标题字体大小
+    axis.title = element_text(size = 16),   # 调整轴标题字体大小
+    axis.text = element_text(size = 14),    # 调整轴文本标签字体大小
+    legend.title = element_text(size = 14), # 调整图例标题字体大小
+    legend.text = element_text(size = 12)   # 调整图例文本标签字体大小
+  )
+```
+
+# Software Information
+
+This section documents information that is important for reproducibility. Most users will not need to read it. It is primarily here for use by the statistician on the team.
+
+We used [R](https://www.r-project.org/) as our main computing environment and [Quarto](https://quarto.org/) scripts to enhance reproducibility. We used [RStudio](www.rstudio.org) as the editor to interface with R and Quarto.
+
+-   Software chain: **qmd file \> RStudio \> Quarto \> R \> knitr \> md file \> Pandoc \> html file**.
+-   Source file: **`r params$SourceFile`**
+-   Output file: **`r params$LogFile`**
+-   [Quarto `r quarto_version()`](https://quarto.org/) runs `*.qmd` files through [R](https://www.r-project.org/) and [knitr](https://yihui.org/knitr/) to produce `*.md` markdown files.
+-   [Pandoc `r rmarkdown::pandoc_version()`](https://pandoc.org) converts markdown files (`*.md`) to other formats, including LaTeX (`*.tex`) and HTML (`*.html`) among others.
+
+\FloatBarrier
+
+## Versions
+
+This document was generated using the following computational environment and dependencies:
+
+```{r}
+#| label: show-version
+#| cfsize: scriptsize
+#| echo: true
+
+# Get R and R package version numbers in use.
+devtools::session_info()
+```
+
+\FloatBarrier
